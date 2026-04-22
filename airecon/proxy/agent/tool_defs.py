@@ -12,7 +12,7 @@ _CONDITIONAL_TOOLS: dict[str, bool] = {}
 def _datasets_installed() -> bool:
     try:
         return any(_DATASETS_DIR.glob("*.db"))
-    except Exception:
+    except OSError:
         return False
 
 

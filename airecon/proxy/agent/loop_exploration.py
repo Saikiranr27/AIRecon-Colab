@@ -348,7 +348,7 @@ class _ExplorationMixin:
         datasets_dir = Path.home() / ".airecon" / "datasets"
         try:
             has_db = any(datasets_dir.glob("*.db"))
-        except Exception:
+        except OSError:
             has_db = False
         if not has_db:
             return ""
