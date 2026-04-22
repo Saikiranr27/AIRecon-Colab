@@ -371,7 +371,7 @@ class OllamaClient:
                 raise
             except httpx.HTTPStatusError as e:
                 if 500 <= e.response.status_code < 600 and attempt < max_retries:
-                    await asyncio.sleep(2 ** (attempt + 1))
+                    await asyncio.sleep(15 * (attempt + 1))
                     continue
                 raise
             except httpx.NetworkError:
@@ -598,7 +598,10 @@ class OllamaClient:
                     raise
 
                 if attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
+                    # 5xx from remote Ollama = likely OOM/VRAM crash on server.
+                    # Needs longer recovery time than a standard transient error.
+                    is_5xx = 500 <= e.response.status_code < 600
+                    wait = (15 * (attempt + 1)) if is_5xx else (2 ** (attempt + 1))
                     logger.warning(
                         "Ollama HTTP error (attempt %d/%d), retrying in %ss: %s",
                         attempt + 1,
