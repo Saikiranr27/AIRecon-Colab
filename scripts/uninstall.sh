@@ -91,7 +91,10 @@ echo -e "  ${MUTED}Installed version:${NC} ${BOLD}v${CURRENT_VERSION}${NC}"
 echo ""
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
-if [ "${1:-}" != "-y" ] && [ "${1:-}" != "--yes" ]; then
+AUTO_YES=0
+[ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ] && AUTO_YES=1
+
+if [ "$AUTO_YES" -eq 0 ]; then
     printf "  ${YELLOW}?${NC}  ${MUTED}Remove airecon v${CURRENT_VERSION}? [y/N]${NC} "
     read -r _reply
     case "$_reply" in
@@ -125,6 +128,47 @@ run_spinner "Removing pip package" bash -c "
             sudo rm -rf '${_PY_USER_LIB}/airecon' '${_PY_USER_LIB}/airecon-'*.dist-info 2>/dev/null || true
     fi
 "
+
+# ── Remove Docker images (optional) ──────────────────────────────────────────
+_SANDBOX_IMAGE="airecon-sandbox"
+_SEARXNG_IMAGE="docker.io/searxng/searxng:latest"
+
+_ask_remove_docker() {
+    local _image="$1"
+    local _label="$2"
+
+    if ! command -v docker &> /dev/null; then
+        return
+    fi
+
+    # Check image exists locally
+    if ! docker image inspect "$_image" > /dev/null 2>&1; then
+        return
+    fi
+
+    local _size
+    _size=$(docker image inspect "$_image" --format '{{.Size}}' 2>/dev/null | \
+        awk '{printf "%.1f GB", $1/1073741824}' || echo "")
+    local _label_with_size="$_label"
+    [ -n "$_size" ] && _label_with_size="$_label (${_size})"
+
+    printf "  ${YELLOW}?${NC}  ${MUTED}Remove Docker image %s? [y/N]${NC} " "$_label_with_size"
+    local _dr
+    if [ "${AUTO_YES:-0}" = "1" ]; then
+        _dr="y"; echo "y"
+    else
+        read -r _dr
+    fi
+    if [ "$_dr" = "y" ] || [ "$_dr" = "Y" ]; then
+        echo ""
+        run_spinner "Removing $_label image" docker rmi -f "$_image"
+    else
+        echo ""
+    fi
+}
+
+_ask_remove_docker "$_SANDBOX_IMAGE" "airecon-sandbox"
+_ask_remove_docker "$_SEARXNG_IMAGE" "searxng/searxng"
 
 # ── Remove Playwright browser data (optional) ─────────────────────────────────
 _PLAYWRIGHT_DIR="${HOME}/.cache/ms-playwright"
