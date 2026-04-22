@@ -2392,12 +2392,22 @@ class BrowserTabManager:
                 except Exception as e2:
                     return {"error": f"Browser crashed and retry failed: {e2}"}
             else:
+                e_str = str(e)
                 error_str = f"Browser action failed: {e}"
-                if "ERR_INVALID_AUTH_CREDENTIALS" in str(e):
+                if "ERR_INVALID_AUTH_CREDENTIALS" in e_str:
                     error_str += (
                         " — This appears to be an authentication error. "
                         "Check that your credentials are valid, clear browser cookies/session data, "
                         "or try a different authentication approach."
+                    )
+                elif "timed out" in e_str.lower() and action_name in ("goto", "launch"):
+                    # Extract URL from args for a targeted advisory
+                    _url_hint = str(args[0]) if args else "target"
+                    error_str += (
+                        f" — {_url_hint} may be WAF-blocked, unreachable, or very slow. "
+                        "PIVOT: use `http_observe` for lightweight HTTP probing, "
+                        "or `execute: curl -sI -m 10 <url>` to check reachability without a browser. "
+                        "Do NOT retry browser_action goto on the same URL."
                     )
                 logger.error(f"Browser action '{action_name}' failed (non-crash): {e}")
                 return {"error": error_str}

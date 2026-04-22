@@ -891,6 +891,9 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         or "cuda out of memory" in err_lower
                         or "llm runner process no longer alive" in err_lower
                         or "signal: killed" in err_lower
+                        # Remote Ollama server OOM — HTTP 500 after exhausting retries
+                        or "500 internal server error" in err_lower
+                        or "server error '5" in err_str
                     )
                     _is_conn_refused = "connection refused" in err_lower
                     _is_timeout = "timeout" in err_lower or "timed out" in err_lower
