@@ -196,6 +196,34 @@ class TestKnowledge:
         assert entries[0]["title"] == "SQLi bypass"
         assert isinstance(entries[0]["tags"], list)
 
+    def test_save_knowledge_merges_duplicate_title(self, memory_manager):
+        memory_manager.save_knowledge(
+            {
+                "category": "analysis",
+                "title": "Header leak triage",
+                "content": "Check server headers for version disclosure",
+                "confidence": 0.6,
+                "source_session": "test_001",
+                "tags": ["headers"],
+            }
+        )
+        memory_manager.save_knowledge(
+            {
+                "category": "analysis",
+                "title": "Header leak triage",
+                "content": "Check server headers for version disclosure and correlate with stack fingerprinting",
+                "confidence": 0.9,
+                "source_session": "test_002",
+                "tags": ["fingerprinting"],
+            }
+        )
+
+        entries = memory_manager.get_knowledge("analysis")
+        assert len(entries) == 1
+        assert entries[0]["confidence"] == pytest.approx(0.9)
+        assert set(entries[0]["tags"]) == {"headers", "fingerprinting"}
+        assert "stack fingerprinting" in entries[0]["content"]
+
 
 class TestSmallModelContext:
     def test_context_includes_learned_chains_and_tool_pitfalls(self, memory_manager):
@@ -305,6 +333,28 @@ class TestContextForSmallModel:
         )
         assert context == ""
 
+    def test_context_includes_phase_specific_knowledge(self, memory_manager):
+        memory_manager.save_knowledge(
+            {
+                "category": "analysis",
+                "title": "Header leak triage",
+                "content": "Check server headers before deeper vuln validation",
+                "confidence": 0.8,
+                "source_session": "test_001",
+                "tags": ["analysis"],
+            }
+        )
+
+        context = memory_manager.get_context_for_small_model(
+            target="example.com",
+            current_phase="ANALYSIS",
+            max_tokens=4096,
+        )
+
+        assert "ANALYSIS LESSONS" in context
+        assert "Header leak triage" in context
+        assert "deeper vuln validation" in context
+
 
 class TestToolStatistics:
     def test_record_and_retrieve_tool_stats(self, memory_manager):
@@ -381,6 +431,46 @@ class TestToolInsights:
         assert insights["total_tools_tracked"] == 2
         assert insights["top_performing_tools"][0]["tool_name"] == "ffuf"
         assert insights["top_performing_tools"][0]["success_rate"] == 0.8
+
+
+class TestModelPerformance:
+    def test_record_model_performance_aggregates_by_task(self, memory_manager):
+        memory_manager.record_model_performance(
+            model_name="llama3",
+            task_type="analysis",
+            response_time_sec=2.0,
+            success=True,
+            context_size_used=1200,
+        )
+        memory_manager.record_model_performance(
+            model_name="llama3",
+            task_type="analysis",
+            response_time_sec=4.0,
+            success=False,
+            context_size_used=800,
+        )
+
+        insights = memory_manager.get_model_performance_insights()
+
+        assert insights["total_records"] == 1
+        row = insights["all_models"][0]
+        assert row["model_name"] == "llama3"
+        assert row["task_type"] == "analysis"
+        assert row["total_requests"] == 2
+        assert row["success_rate"] == pytest.approx(0.5)
+        assert row["avg_response_time_sec"] == pytest.approx(3.0)
+
+    def test_get_model_recommendation_prefers_trained_task_profile(self, memory_manager):
+        for _ in range(5):
+            memory_manager.record_model_performance(
+                model_name="qwen-local",
+                task_type="analysis",
+                response_time_sec=1.5,
+                success=True,
+                context_size_used=900,
+            )
+
+        assert memory_manager.get_model_recommendation("analysis") == "qwen-local"
 
 
 class TestHealthSnapshot:

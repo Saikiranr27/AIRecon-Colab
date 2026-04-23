@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -199,6 +200,81 @@ class TestAdaptiveLearningEngine:
         assert len(insights) == 1
         assert insights[0].title == "Prefer observe first"
 
+    @pytest.mark.asyncio
+    async def test_distill_insights_persists_knowledge_to_memory_db(
+        self, isolated_learning_paths, monkeypatch
+    ):
+        learning_mod, memory_db = isolated_learning_paths
+        _init_learning_db(memory_db)
+
+        engine = learning_mod.AdaptiveLearningEngine(
+            min_observations=1,
+            session_id="test_knowledge",
+        )
+        engine.observation_log = [
+            learning_mod.ObservationLog(
+                timestamp=1.0,
+                tool_name="auth_probe",
+                arguments={},
+                result_summary="login flow reused",
+                success=True,
+                confidence=0.8,
+                phase="EXPLOIT",
+                target_type="nginx",
+            )
+            for _ in range(3)
+        ]
+
+        class _FakeFuture:
+            def result(self, timeout=None):
+                return json.dumps(
+                    [
+                        {
+                            "category": "exploit_chain",
+                            "title": "Reuse login bypass early",
+                            "conditions": {"phase": "EXPLOIT", "tech": "NGINX"},
+                            "recommendation": "Carry the working auth bypass forward before deeper exploit steps",
+                        }
+                    ]
+                )
+
+        class _FakeExecutor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn):
+                return _FakeFuture()
+
+        monkeypatch.setattr(
+            learning_mod.concurrent.futures,
+            "ThreadPoolExecutor",
+            lambda max_workers=1: _FakeExecutor(),
+        )
+
+        insights = engine.distill_insights(
+            ollama_url="http://ollama.local",
+            model="qwen-test",
+        )
+
+        assert len(insights) == 1
+
+        conn = sqlite3.connect(str(memory_db))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT category, title, content, tags FROM knowledge")
+        row = cur.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row["category"] == "exploitation"
+        assert row["title"] == "Reuse login bypass early"
+        assert "auth bypass" in row["content"].lower()
+        assert "phase:exploit" in json.loads(row["tags"])
+        assert "tech:nginx" in json.loads(row["tags"])
+
     def test_tool_name_and_phase_caches_are_metadata_driven(self, monkeypatch):
         import airecon.proxy.agent.adaptive_learning as learning_mod
 
@@ -252,6 +328,47 @@ class TestAdaptiveLearningEngine:
         assert learning_mod._infer_phase_from_tool("reportx") == "report"
         assert learning_mod._infer_phase_from_tool("extra_analysis") == "analysis"
         assert learning_mod._infer_phase_from_tool("callablex") == "recon"
+
+    def test_recommend_strategy_matches_phase_case_insensitively(
+        self, isolated_learning_paths
+    ):
+        learning_mod, _ = isolated_learning_paths
+        engine = learning_mod.AdaptiveLearningEngine(session_id="test_strategy_case")
+        engine.strategy_patterns.append(
+            learning_mod.StrategyPattern(
+                pattern_id="pat-1",
+                description="Recon nginx first",
+                conditions={"phase": "recon", "tech": "nginx"},
+                tool_sequence=["http_observe", "ffuf"],
+                success_count=3,
+                failure_count=0,
+            )
+        )
+
+        strategy = engine.recommend_strategy({"phase": "RECON", "tech": "NGINX"})
+
+        assert strategy is not None
+        assert strategy.pattern_id == "pat-1"
+
+    def test_recommend_tools_honors_legacy_detected_tech_context(
+        self, isolated_learning_paths
+    ):
+        learning_mod, _ = isolated_learning_paths
+        engine = learning_mod.AdaptiveLearningEngine(session_id="test_legacy_context")
+        perf = learning_mod.ToolPerformance(
+            tool_name="sqlmap",
+            total_uses=4,
+            successes=4,
+            failures=0,
+            last_used=time.time(),
+        )
+        perf.context_scores["tech=nginx=detected"] = 0.95
+        engine.tool_performances["sqlmap"] = perf
+
+        recs = engine.recommend_tools(phase="ANALYSIS", tech_stack=["Nginx"], top_n=3)
+
+        assert recs
+        assert recs[0][0] == "sqlmap"
 
 
 class TestTargetMemoryStore:

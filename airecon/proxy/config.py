@@ -686,6 +686,10 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         True,
         "Enable payload memory engine. Tracks payload success/failure per target to avoid repeating failed payloads.",
     ),
+    "session_persistence_enabled": (
+        True,
+        "Persist per-target payload/adaptive state to the workspace and restore it on future runs.",
+    ),
     "payload_memory_max_records": (
         10000,
         "Maximum payload records to keep in memory before pruning.",
@@ -923,6 +927,7 @@ _CONFIG_CATEGORIES = [
         "Payload Memory Engine",
         [
             "payload_memory_enabled",
+            "session_persistence_enabled",
             "payload_memory_max_records",
             "payload_memory_ttl_days",
         ],
@@ -1276,6 +1281,7 @@ class Config:
     intelligence_attack_chain_synthesis_enabled: bool
 
     payload_memory_enabled: bool
+    session_persistence_enabled: bool
     payload_memory_max_records: int
     payload_memory_ttl_days: int
 

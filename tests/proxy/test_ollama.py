@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,7 +95,10 @@ class TestOllamaComplete:
     def client(self):
         from airecon.proxy.ollama import OllamaClient
 
-        with patch("airecon.proxy.ollama.get_config") as mock_cfg:
+        with (
+            patch("airecon.proxy.ollama.get_config") as mock_cfg,
+            patch("airecon.proxy.ollama.get_memory_manager") as mock_memory,
+        ):
             cfg = MagicMock()
             cfg.ollama_url = "http://localhost:11434"
             cfg.ollama_model = "llama3"
@@ -103,11 +107,13 @@ class TestOllamaComplete:
             cfg.ollama_timeout = 120.0
             cfg.ollama_chunk_timeout = 60.0
             mock_cfg.return_value = cfg
+            mock_memory.return_value = MagicMock()
 
             c = OllamaClient()
             c._httpx_client = MagicMock()
             c._initialized = True
-            return c
+            c._memory_manager_mock = mock_memory.return_value
+            yield c
 
     @pytest.mark.asyncio
     async def test_complete_returns_content(self, client):
@@ -149,6 +155,86 @@ class TestOllamaComplete:
                 await client.complete(
                     messages=[{"role": "user", "content": "hi"}], max_retries=0
                 )
+
+    @pytest.mark.asyncio
+    async def test_complete_records_model_performance(self, client):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "message": {"content": "Hello world", "role": "assistant"}
+        }
+
+        with patch.object(client, "_run_http_request", return_value=mock_resp):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                max_retries=0,
+                operation="analysis",
+            )
+
+        kwargs = client._memory_manager_mock.record_model_performance.call_args.kwargs
+        assert kwargs["model_name"] == "llama3"
+        assert kwargs["task_type"] == "analysis"
+        assert kwargs["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_records_model_performance(self):
+        from airecon.proxy.ollama import OllamaClient
+
+        with patch("airecon.proxy.ollama.get_config") as mock_cfg:
+            cfg = MagicMock()
+            cfg.ollama_url = "http://localhost:11434"
+            cfg.ollama_model = "llama3"
+            cfg.ollama_supports_thinking = False
+            cfg.ollama_supports_native_tools = False
+            cfg.ollama_timeout = 120.0
+            cfg.ollama_chunk_timeout = 60.0
+            mock_cfg.return_value = cfg
+            client = OllamaClient()
+
+        class _FakeStreamResponse:
+            def raise_for_status(self):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def aiter_lines(self):
+                for line in [
+                    '{"message":{"content":"hello"},"done":false}',
+                    '{"message":{"content":""},"done":true}',
+                ]:
+                    yield line
+
+        class _FakeHttpClient:
+            def stream(self, *args, **kwargs):
+                return _FakeStreamResponse()
+
+        memory = MagicMock()
+        client._request_semaphore = asyncio.Semaphore(1)
+
+        with patch("airecon.proxy.ollama.get_memory_manager", return_value=memory):
+            from airecon.proxy.ollama import OllamaClient as OllamaClass
+
+            old_httpx_client = OllamaClass._httpx_client
+            try:
+                OllamaClass._httpx_client = _FakeHttpClient()
+                chunks = [
+                    chunk
+                    async for chunk in client.chat_stream(
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_retries=0,
+                        operation="recon",
+                    )
+                ]
+            finally:
+                OllamaClass._httpx_client = old_httpx_client
+
+        assert len(chunks) == 2
+        kwargs = memory.record_model_performance.call_args.kwargs
+        assert kwargs["task_type"] == "recon"
+        assert kwargs["success"] is True
 
 
 class TestOllamaResetContext:

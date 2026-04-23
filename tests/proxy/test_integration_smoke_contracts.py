@@ -98,7 +98,7 @@ async def test_ollama_complete_contract_accepts_dict_message_content() -> None:
             ollama_chunk_timeout=30.0,
             ollama_num_ctx=65536,
         ),
-    ):
+    ), patch("airecon.proxy.ollama.get_memory_manager", return_value=MagicMock()):
         result = await client.complete(
             messages=[{"role": "user", "content": "ping"}], max_retries=0
         )
@@ -135,7 +135,7 @@ async def test_ollama_complete_contract_rejects_invalid_response_format() -> Non
             ollama_chunk_timeout=30.0,
             ollama_num_ctx=65536,
         ),
-    ):
+    ), patch("airecon.proxy.ollama.get_memory_manager", return_value=MagicMock()):
         with pytest.raises(RuntimeError, match="Invalid Ollama response format"):
             await client.complete(
                 messages=[{"role": "user", "content": "ping"}], max_retries=0

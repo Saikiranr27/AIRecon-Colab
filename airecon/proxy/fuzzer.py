@@ -199,6 +199,7 @@ class Fuzzer:
         self._direct_client: httpx.AsyncClient | None = None
         self._waf_bypass_attempts: dict[str, int] = {}
         self._waf_bypass_limit = self._get_fuzzer_config().fuzzer_waf_bypass_limit
+        self._payload_memory_tech_stack: list[str] = []
 
         self.enable_waf_bypass = enable_waf_bypass
         if enable_waf_bypass:
@@ -810,6 +811,11 @@ class Fuzzer:
         # ── Intelligence: Target Profiling ─────────────────────────────────
         target_profile = await self._profile_target_if_enabled()
         priority_vuln_types = self._prioritize_vuln_types(vuln_types, target_profile)
+        self._payload_memory_tech_stack = [
+            str(t.name).strip()
+            for t in getattr(target_profile, "technologies", [])
+            if str(getattr(t, "name", "")).strip()
+        ]
 
         baseline_tasks = [self._fetch_baseline(p) for p in params]
         baseline_results = await asyncio.gather(*baseline_tasks, return_exceptions=True)
@@ -857,6 +863,16 @@ class Fuzzer:
                 payloads = self._select_context_aware_payloads(
                     vt, target_profile, param, base_payloads
                 )
+                if self.payload_memory:
+                    payloads = self.payload_memory.prioritize_payloads(
+                        payloads,
+                        vuln_type=vt,
+                        target=self.target,
+                        waf=self.detected_wafs[0] if self.detected_wafs else "",
+                        tech=self._payload_memory_tech_stack[0]
+                        if self._payload_memory_tech_stack
+                        else "",
+                    )
                 if max_payloads_per_type > 0:
                     payloads = payloads[:max_payloads_per_type]
                 for payload in payloads:
@@ -1212,7 +1228,7 @@ class Fuzzer:
                     confidence=analysis["confidence"],
                     status_code=resp.status_code,
                     waf_detected=self.detected_wafs[0] if self.detected_wafs else "",
-                    tech_stack=list(self.detected_wafs),
+                    tech_stack=list(self._payload_memory_tech_stack),
                     response_time_ms=elapsed,
                 )
             return FuzzResult(
@@ -1238,7 +1254,7 @@ class Fuzzer:
                 confidence=analysis.get("confidence", 0.0),
                 status_code=resp.status_code if resp else 0,
                 waf_detected=self.detected_wafs[0] if self.detected_wafs else "",
-                tech_stack=list(self.detected_wafs),
+                tech_stack=list(self._payload_memory_tech_stack),
                 response_time_ms=elapsed,
             )
         return None

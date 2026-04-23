@@ -13,6 +13,7 @@ def test_config_default_initialization(tmp_path):
     assert cfg.agent_exploration_mode is True
     assert cfg.agent_stagnation_threshold >= 1
     assert cfg.agent_tool_diversity_window >= 3
+    assert cfg.session_persistence_enabled is True
 
 
 def test_config_file_loading(tmp_path):

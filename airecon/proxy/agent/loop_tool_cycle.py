@@ -749,6 +749,7 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             ),
                         },
                         think=self._should_use_thinking(cfg, current_phase),
+                        operation=str(current_phase or "chat").strip().lower(),
                         stop_requested_fn=lambda: self._stop_requested,
                     )
 

@@ -5,11 +5,13 @@ import contextlib
 import json
 import logging
 import threading
+import time
 from typing import Any, AsyncIterator, Callable, Dict
 
 import httpx
 
 from .config import get_config
+from .memory import get_memory_manager
 
 logger = logging.getLogger("airecon.ollama")
 
@@ -295,29 +297,80 @@ class OllamaClient:
         operation: str = "compression",
     ) -> str:
         max_retries = max(0, max_retries)
+        request_started = time.monotonic()
 
-        for attempt in range(max_retries + 1):
-            try:
-                payload: dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                }
+        try:
+            for attempt in range(max_retries + 1):
+                try:
+                    payload: dict[str, Any] = {
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                    }
 
-                if options:
-                    payload["options"] = options
+                    if options:
+                        payload["options"] = options
 
-                timeout = self._get_dynamic_timeout(operation)
+                    timeout = self._get_dynamic_timeout(operation)
 
-                resp = await self._run_http_request(
-                    "POST",
-                    "/api/chat",
-                    json_data=payload,
-                    timeout=timeout,
-                )
-                if resp is None:
+                    resp = await self._run_http_request(
+                        "POST",
+                        "/api/chat",
+                        json_data=payload,
+                        timeout=timeout,
+                    )
+                    if resp is None:
+                        logger.warning(
+                            "Ollama returned None response. Attempt %d/%d",
+                            attempt + 1,
+                            max_retries + 1,
+                        )
+                        if attempt < max_retries:
+                            await asyncio.sleep(2 ** (attempt + 1))
+                            continue
+                        raise RuntimeError(
+                            "Ollama returned None response after all retries"
+                        )
+                    data = resp.json()
+
+                    content = None
+                    if isinstance(data, dict):
+                        message = data.get("message", {})
+                        if isinstance(message, dict):
+                            content = message.get("content")
+
+                    if content is None:
+                        logger.warning(
+                            "Ollama returned unexpected response format: %r. Attempt %d/%d",
+                            data,
+                            attempt + 1,
+                            max_retries + 1,
+                        )
+                        if attempt < max_retries:
+                            await asyncio.sleep(2 ** (attempt + 1))
+                            continue
+                        raise RuntimeError(
+                            f"Invalid Ollama response format: {type(data)}. "
+                            f"Expected dict with 'message.content' or 'content' key."
+                        )
+
+                    elapsed = time.monotonic() - request_started
+                    self._record_response_time(elapsed)
+                    self._record_model_performance(
+                        operation=operation,
+                        response_time_sec=elapsed,
+                        success=True,
+                        messages=messages,
+                        options=options,
+                    )
+                    return content or ""
+
+                except asyncio.TimeoutError:
+                    timeout = self._get_dynamic_timeout(operation)
                     logger.warning(
-                        "Ollama returned None response. Attempt %d/%d",
+                        "Ollama complete() timeout (%.0fs) for model %s (attempt %d/%d)",
+                        timeout,
+                        self.model,
                         attempt + 1,
                         max_retries + 1,
                     )
@@ -325,62 +378,32 @@ class OllamaClient:
                         await asyncio.sleep(2 ** (attempt + 1))
                         continue
                     raise RuntimeError(
-                        "Ollama returned None response after all retries"
+                        f"Ollama timeout after {timeout:.0f}s for model {self.model}"
                     )
-                data = resp.json()
-
-                content = None
-                if isinstance(data, dict):
-                    message = data.get("message", {})
-                    if isinstance(message, dict):
-                        content = message.get("content")
-
-                if content is None:
-                    logger.warning(
-                        "Ollama returned unexpected response format: %r. Attempt %d/%d",
-                        data,
-                        attempt + 1,
-                        max_retries + 1,
-                    )
+                except RuntimeError:
+                    raise
+                except httpx.HTTPStatusError as e:
+                    if 500 <= e.response.status_code < 600 and attempt < max_retries:
+                        await asyncio.sleep(15 * (attempt + 1))
+                        continue
+                    raise
+                except httpx.NetworkError:
                     if attempt < max_retries:
                         await asyncio.sleep(2 ** (attempt + 1))
                         continue
-                    raise RuntimeError(
-                        f"Invalid Ollama response format: {type(data)}. "
-                        f"Expected dict with 'message.content' or 'content' key."
-                    )
+                    raise
 
-                return content or ""
-
-            except asyncio.TimeoutError:
-                timeout = self._get_dynamic_timeout(operation)
-                logger.warning(
-                    "Ollama complete() timeout (%.0fs) for model %s (attempt %d/%d)",
-                    timeout,
-                    self.model,
-                    attempt + 1,
-                    max_retries + 1,
-                )
-                if attempt < max_retries:
-                    await asyncio.sleep(2 ** (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    f"Ollama timeout after {timeout:.0f}s for model {self.model}"
-                )
-            except RuntimeError:
-                raise
-            except httpx.HTTPStatusError as e:
-                if 500 <= e.response.status_code < 600 and attempt < max_retries:
-                    await asyncio.sleep(15 * (attempt + 1))
-                    continue
-                raise
-            except httpx.NetworkError:
-                if attempt < max_retries:
-                    await asyncio.sleep(2 ** (attempt + 1))
-                    continue
-                raise
-
-        raise RuntimeError("Unexpected code path in complete()")
+            raise RuntimeError("Unexpected code path in complete()")
+        except Exception:
+            elapsed = time.monotonic() - request_started
+            self._record_model_performance(
+                operation=operation,
+                response_time_sec=elapsed,
+                success=False,
+                messages=messages,
+                options=options,
+            )
+            raise
 
     async def chat_stream(
         self,
@@ -389,10 +412,17 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         think: bool = False,
         max_retries: int = 3,
+        operation: str = "chat",
         stop_requested_fn: Callable[[], bool] | None = None,
     ) -> AsyncIterator[Any]:
         async for chunk in self._chat_stream_impl(
-            messages, tools, options, think, max_retries, stop_requested_fn
+            messages,
+            tools,
+            options,
+            think,
+            max_retries,
+            operation,
+            stop_requested_fn,
         ):
             yield chunk
 
@@ -403,6 +433,7 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         think: bool = False,
         max_retries: int = 3,
+        operation: str = "chat",
         stop_requested_fn: Callable[[], bool] | None = None,
     ) -> AsyncIterator[Any]:
         cfg = get_config()
@@ -422,235 +453,325 @@ class OllamaClient:
         _STOP_POLL = 2.0
         _overall_timeout = cfg.ollama_timeout
         _chunk_timeout = cfg.ollama_chunk_timeout
+        request_started = time.monotonic()
 
-        for attempt in range(max_retries + 1):
-            _next_fut: asyncio.Future | None = None
-            _last_activity_time: float | None = None
-            _stream = None
-            _aiter = None
+        try:
+            for attempt in range(max_retries + 1):
+                _next_fut: asyncio.Future | None = None
+                _last_activity_time: float | None = None
+                _stream = None
+                _aiter = None
 
-            async def _cleanup_next_future() -> None:
-                nonlocal _next_fut
-                if _next_fut is None:
-                    return
-                fut = _next_fut
-                _next_fut = None
-                if not fut.done():
-                    fut.cancel()
-                with contextlib.suppress(
-                    asyncio.CancelledError,
-                    StopAsyncIteration,
-                    Exception,
-                ):
-                    await fut
+                async def _cleanup_next_future() -> None:
+                    nonlocal _next_fut
+                    if _next_fut is None:
+                        return
+                    fut = _next_fut
+                    _next_fut = None
+                    if not fut.done():
+                        fut.cancel()
+                    with contextlib.suppress(
+                        asyncio.CancelledError,
+                        StopAsyncIteration,
+                        Exception,
+                    ):
+                        await fut
 
-            try:
-                async with self._request_semaphore:
-                    client = OllamaClient._httpx_client
-                    if client is None:
-                        raise RuntimeError("HTTP client not initialized")
+                try:
+                    async with self._request_semaphore:
+                        client = OllamaClient._httpx_client
+                        if client is None:
+                            raise RuntimeError("HTTP client not initialized")
 
-                    start_time = asyncio.get_running_loop().time()
-                    _last_activity_time = start_time
+                        start_time = asyncio.get_running_loop().time()
+                        _last_activity_time = start_time
 
-                    url = f"{self._host}/api/chat"
-                    timeout_obj = httpx.Timeout(_overall_timeout, read=_chunk_timeout)
+                        url = f"{self._host}/api/chat"
+                        timeout_obj = httpx.Timeout(_overall_timeout, read=_chunk_timeout)
 
-                    async with client.stream(
-                        "POST",
-                        url,
-                        json=payload,
-                        timeout=timeout_obj,
-                    ) as resp:
-                        resp.raise_for_status()
-                        _aiter = resp.aiter_lines()
+                        async with client.stream(
+                            "POST",
+                            url,
+                            json=payload,
+                            timeout=timeout_obj,
+                        ) as resp:
+                            resp.raise_for_status()
+                            _aiter = resp.aiter_lines()
 
-                        chunk_count = 0
-                        elapsed = 0.0
-
-                        while True:
-                            current_time = asyncio.get_running_loop().time()
-
-                            if (current_time - start_time) > _overall_timeout:
-                                raise TimeoutError(
-                                    f"Ollama overall timeout: request took longer than {_overall_timeout:.0f}s"
-                                )
-
-                            if _last_activity_time is not None:
-                                inactivity_time = current_time - _last_activity_time
-                                if inactivity_time > get_config().ollama_timeout:
-                                    logger.warning(
-                                        "Ollama inactivity: %.0fs, cancelling request",
-                                        inactivity_time,
-                                    )
-                                    raise TimeoutError("Ollama inactivity timeout")
-
-                            if stop_requested_fn and stop_requested_fn():
-                                await _cleanup_next_future()
-                                return
-
-                            if _next_fut is None:
-                                _next_fut = asyncio.ensure_future(_aiter.__anext__())
-                                _next_fut.add_done_callback(
-                                    lambda fut: fut.exception()
-                                )
-
-                            remaining = _chunk_timeout - elapsed
-                            wait = (
-                                min(_STOP_POLL, remaining)
-                                if remaining > 0
-                                else _STOP_POLL
-                            )
-
-                            try:
-                                if _next_fut is None:
-                                    raise RuntimeError(
-                                        "Ollama stream state error: next future is None"
-                                    )
-                                line = await asyncio.wait_for(
-                                    asyncio.shield(_next_fut),
-                                    timeout=wait,
-                                )
-                            except StopAsyncIteration:
-                                _next_fut = None
-                                if _last_activity_time is not None:
-                                    _last_activity_time = (
-                                        asyncio.get_running_loop().time()
-                                    )
-                                break
-                            except asyncio.TimeoutError:
-                                elapsed += wait
-                                if elapsed >= _chunk_timeout:
-                                    if _next_fut is not None and not _next_fut.done():
-                                        _next_fut.cancel()
-                                        try:
-                                            await _next_fut
-                                        except (
-                                            StopAsyncIteration,
-                                            asyncio.CancelledError,
-                                        ):
-                                            pass
-                                    _next_fut = None
-                                    raise TimeoutError(
-                                        f"Ollama stream timeout: no chunk received for {_chunk_timeout:.0f}s "
-                                        f"after {chunk_count} chunks."
-                                    )
-                                continue
-
+                            chunk_count = 0
                             elapsed = 0.0
-                            if _last_activity_time is not None:
-                                _last_activity_time = asyncio.get_running_loop().time()
-                            _next_fut = None
+                            done_received = False
 
-                            if not line:
-                                continue
+                            while True:
+                                current_time = asyncio.get_running_loop().time()
 
-                            try:
-                                chunk = json.loads(line)
-                                yield chunk
-                                chunk_count += 1
+                                if (current_time - start_time) > _overall_timeout:
+                                    raise TimeoutError(
+                                        f"Ollama overall timeout: request took longer than {_overall_timeout:.0f}s"
+                                    )
 
-                                if chunk.get("done"):
+                                if _last_activity_time is not None:
+                                    inactivity_time = current_time - _last_activity_time
+                                    if inactivity_time > get_config().ollama_timeout:
+                                        logger.warning(
+                                            "Ollama inactivity: %.0fs, cancelling request",
+                                            inactivity_time,
+                                        )
+                                        raise TimeoutError("Ollama inactivity timeout")
+
+                                if stop_requested_fn and stop_requested_fn():
+                                    await _cleanup_next_future()
+                                    return
+
+                                if _next_fut is None:
+                                    _next_fut = asyncio.ensure_future(_aiter.__anext__())
+                                    _next_fut.add_done_callback(
+                                        lambda fut: fut.exception()
+                                    )
+
+                                remaining = _chunk_timeout - elapsed
+                                wait = (
+                                    min(_STOP_POLL, remaining)
+                                    if remaining > 0
+                                    else _STOP_POLL
+                                )
+
+                                try:
+                                    if _next_fut is None:
+                                        raise RuntimeError(
+                                            "Ollama stream state error: next future is None"
+                                        )
+                                    line = await asyncio.wait_for(
+                                        asyncio.shield(_next_fut),
+                                        timeout=wait,
+                                    )
+                                except StopAsyncIteration:
+                                    _next_fut = None
+                                    if _last_activity_time is not None:
+                                        _last_activity_time = (
+                                            asyncio.get_running_loop().time()
+                                        )
                                     break
+                                except asyncio.TimeoutError:
+                                    elapsed += wait
+                                    if elapsed >= _chunk_timeout:
+                                        if _next_fut is not None and not _next_fut.done():
+                                            _next_fut.cancel()
+                                            try:
+                                                await _next_fut
+                                            except (
+                                                StopAsyncIteration,
+                                                asyncio.CancelledError,
+                                            ):
+                                                pass
+                                        _next_fut = None
+                                        raise TimeoutError(
+                                            f"Ollama stream timeout: no chunk received for {_chunk_timeout:.0f}s "
+                                            f"after {chunk_count} chunks."
+                                        )
+                                    continue
 
-                            except json.JSONDecodeError:
-                                continue
+                                elapsed = 0.0
+                                if _last_activity_time is not None:
+                                    _last_activity_time = asyncio.get_running_loop().time()
+                                _next_fut = None
 
-                return
+                                if not line:
+                                    continue
 
-            except TimeoutError:
-                await _cleanup_next_future()
-                raise
+                                try:
+                                    chunk = json.loads(line)
+                                    yield chunk
+                                    chunk_count += 1
 
-            except httpx.ReadError as e:
-                await _cleanup_next_future()
-                # Stream-level read error (connection reset by peer,
-                # dropped TLS, etc.) — always transient, retry safely.
-                if attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(
-                        "Ollama stream read error (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        max_retries + 1,
-                        wait,
-                        e,
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-                logger.error(
-                    "Ollama stream read error after %d attempts: %s",
-                    max_retries + 1,
-                    e,
-                )
-                raise TimeoutError(
-                    f"Ollama stream disconnected after {max_retries + 1} retries: {e}"
-                ) from e
+                                    if chunk.get("done"):
+                                        done_received = True
+                                        break
 
-            except httpx.HTTPStatusError as e:
-                err_msg = str(e).lower()
+                                except json.JSONDecodeError:
+                                    continue
 
-                if any(p in err_msg for p in _PERMANENT_OLLAMA_ERRORS):
-                    logger.error("Permanent Ollama error (not retrying): %s", e)
+                    elapsed_total = time.monotonic() - request_started
+                    if done_received or chunk_count > 0:
+                        self._record_response_time(elapsed_total)
+                        self._record_model_performance(
+                            operation=operation,
+                            response_time_sec=elapsed_total,
+                            success=True,
+                            messages=messages,
+                            options=options,
+                        )
+                    return
+
+                except TimeoutError:
+                    await _cleanup_next_future()
                     raise
 
-                if 400 <= e.response.status_code < 500:
-                    logger.error("Permanent Ollama error (client error): %s", e)
+                except httpx.ReadError as e:
+                    await _cleanup_next_future()
+                    # Stream-level read error (connection reset by peer,
+                    # dropped TLS, etc.) — always transient, retry safely.
+                    if attempt < max_retries:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(
+                            "Ollama stream read error (attempt %d/%d), retrying in %ds: %s",
+                            attempt + 1,
+                            max_retries + 1,
+                            wait,
+                            e,
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.error(
+                        "Ollama stream read error after %d attempts: %s",
+                        max_retries + 1,
+                        e,
+                    )
+                    raise TimeoutError(
+                        f"Ollama stream disconnected after {max_retries + 1} retries: {e}"
+                    ) from e
+
+                except httpx.HTTPStatusError as e:
+                    err_msg = str(e).lower()
+
+                    if any(p in err_msg for p in _PERMANENT_OLLAMA_ERRORS):
+                        logger.error("Permanent Ollama error (not retrying): %s", e)
+                        raise
+
+                    if 400 <= e.response.status_code < 500:
+                        logger.error("Permanent Ollama error (client error): %s", e)
+                        raise
+
+                    if attempt < max_retries:
+                        # 5xx from remote Ollama = likely OOM/VRAM crash on server.
+                        # Needs longer recovery time than a standard transient error.
+                        is_5xx = 500 <= e.response.status_code < 600
+                        wait = (15 * (attempt + 1)) if is_5xx else (2 ** (attempt + 1))
+                        logger.warning(
+                            "Ollama HTTP error (attempt %d/%d), retrying in %ss: %s",
+                            attempt + 1,
+                            max_retries + 1,
+                            wait,
+                            e,
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.error(
+                        "Ollama HTTP error after %d attempts: %s",
+                        max_retries + 1,
+                        e,
+                    )
                     raise
 
-                if attempt < max_retries:
-                    # 5xx from remote Ollama = likely OOM/VRAM crash on server.
-                    # Needs longer recovery time than a standard transient error.
-                    is_5xx = 500 <= e.response.status_code < 600
-                    wait = (15 * (attempt + 1)) if is_5xx else (2 ** (attempt + 1))
-                    logger.warning(
-                        "Ollama HTTP error (attempt %d/%d), retrying in %ss: %s",
-                        attempt + 1,
-                        max_retries + 1,
-                        wait,
-                        e,
+                except Exception as e:
+                    await _cleanup_next_future()
+
+                    err_str = str(e).lower()
+                    is_transient = any(
+                        k in err_str
+                        for k in (
+                            "connection reset",
+                            "connection refused",
+                            "eof",
+                            "broken pipe",
+                            "timeout",
+                            "timed out",
+                            "network",
+                            "connection error",
+                            "stream ended",
+                        )
                     )
-                    await asyncio.sleep(wait)
+
+                    if is_transient and attempt < max_retries:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(
+                            "Transient Ollama error (attempt %d/%d), retrying in %ss: %s",
+                            attempt + 1,
+                            max_retries + 1,
+                            wait,
+                            e,
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
+                    logger.exception("Unexpected error: %s", e)
+                    raise
+        except Exception:
+            elapsed_total = time.monotonic() - request_started
+            self._record_model_performance(
+                operation=operation,
+                response_time_sec=elapsed_total,
+                success=False,
+                messages=messages,
+                options=options,
+            )
+            raise
+
+    @staticmethod
+    def _normalize_task_type(operation: str) -> str:
+        task_type = str(operation or "").strip().lower()
+        aliases = {
+            "inference": "chat",
+            "validation": "analysis",
+            "summarization": "compression",
+        }
+        return aliases.get(task_type, task_type or "general")
+
+    @staticmethod
+    def _estimate_context_size(
+        messages: list[dict[str, Any]],
+        options: dict[str, Any] | None = None,
+    ) -> int:
+        total_chars = 0
+        for message in messages or []:
+            if not isinstance(message, dict):
+                total_chars += len(str(message))
+                continue
+            for key in ("content", "thinking", "tool_calls"):
+                value = message.get(key)
+                if value in (None, ""):
                     continue
-                logger.error(
-                    "Ollama HTTP error after %d attempts: %s",
-                    max_retries + 1,
-                    e,
-                )
-                raise
+                if isinstance(value, str):
+                    total_chars += len(value)
+                else:
+                    try:
+                        total_chars += len(json.dumps(value, ensure_ascii=False))
+                    except Exception:
+                        total_chars += len(str(value))
 
-            except Exception as e:
-                await _cleanup_next_future()
+        estimated_tokens = total_chars // 4
+        if estimated_tokens > 0:
+            return estimated_tokens
 
-                err_str = str(e).lower()
-                is_transient = any(
-                    k in err_str
-                    for k in (
-                        "connection reset",
-                        "connection refused",
-                        "eof",
-                        "broken pipe",
-                        "timeout",
-                        "timed out",
-                        "network",
-                        "connection error",
-                        "stream ended",
-                    )
-                )
+        if isinstance(options, dict):
+            try:
+                return max(0, int(options.get("num_ctx", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+        return 0
 
-                if is_transient and attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(
-                        "Transient Ollama error (attempt %d/%d), retrying in %ss: %s",
-                        attempt + 1,
-                        max_retries + 1,
-                        wait,
-                        e,
-                    )
-                    await asyncio.sleep(wait)
-                    continue
+    def _record_model_performance(
+        self,
+        operation: str,
+        response_time_sec: float,
+        success: bool,
+        messages: list[dict[str, Any]],
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        model_name = str(getattr(self, "model", "") or "").strip()
+        if not model_name:
+            return
 
-                logger.exception("Unexpected error: %s", e)
-                raise
+        try:
+            get_memory_manager().record_model_performance(
+                model_name=model_name,
+                task_type=self._normalize_task_type(operation),
+                response_time_sec=max(0.0, float(response_time_sec or 0.0)),
+                success=success,
+                context_size_used=self._estimate_context_size(messages, options),
+            )
+        except Exception as exc:
+            logger.debug("Failed to record model performance: %s", exc)
 
     def _get_dynamic_timeout(self, operation: str = "inference") -> float:
         cfg = get_config()

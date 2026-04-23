@@ -343,6 +343,23 @@ class _CyclePreludeMixin:
         if (
             self._session
             and self._session.target
+            and self.state.iteration > 0
+            and self.state.iteration % self._session_save_interval == 0
+            and self.state.iteration != self._last_session_save_iteration
+            and hasattr(self, "_save_session_persistence")
+        ):
+            try:
+                await self._save_session_persistence()
+            except Exception as _persist_err:
+                logger.debug(
+                    "Failed to persist adaptive/payload state at iteration %d: %s",
+                    self.state.iteration,
+                    _persist_err,
+                )
+
+        if (
+            self._session
+            and self._session.target
             and self.state.iteration % self._memory_save_interval == 0
             and self.state.iteration != self._last_memory_save_iteration
         ):
