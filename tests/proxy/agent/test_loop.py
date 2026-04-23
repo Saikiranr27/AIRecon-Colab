@@ -1,4 +1,5 @@
 import pytest
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 from airecon.proxy.agent.loop import AgentLoop
@@ -119,6 +120,93 @@ async def test_load_session_persistence_restores_adaptive_state(agent_loop, mock
         p.pattern_id == "p1" and p.tool_sequence == ["httpx", "nuclei"]
         for p in agent_loop._adaptive_learning_engine.strategy_patterns
     )
+
+
+@pytest.mark.asyncio
+async def test_load_session_persistence_buffers_payload_memory(agent_loop, mocker):
+    agent_loop._session = SessionData(target="example.com", session_id="sess-1")
+    persist = MagicMock()
+    persist.load_payload_memory.return_value = [
+        {
+            "payload": "' OR 1=1--",
+            "vuln_type": "sql_injection",
+            "target": "example.com",
+            "param": "id",
+            "success": False,
+            "confidence": 0.2,
+            "status_code": 200,
+            "waf_detected": "",
+            "tech_stack": [],
+            "response_time_ms": 12.0,
+            "error": "",
+            "timestamp": time.time(),
+            "attempts": 2,
+        }
+    ]
+    persist.load_adaptive_state.return_value = None
+
+    mocker.patch(
+        "airecon.proxy.agent.loop.get_config",
+        return_value=SimpleNamespace(
+            session_persistence_enabled=True,
+            intelligence_adaptive_min_observations=3,
+        ),
+    )
+    mocker.patch("airecon.proxy.agent.loop.get_workspace_root", return_value="/tmp")
+    mocker.patch(
+        "airecon.proxy.agent.session_persistence.SessionPersistenceEngine",
+        return_value=persist,
+    )
+
+    await agent_loop._load_session_persistence()
+
+    assert len(agent_loop._pending_payload_memory_records) == 1
+    assert agent_loop._pending_payload_memory_records[0]["param"] == "id"
+    assert agent_loop._loaded_session_persistence_target == "example.com"
+
+
+def test_restore_payload_memory_into_fuzzer(agent_loop):
+    from airecon.proxy.agent.payload_memory import PayloadMemoryEngine
+
+    agent_loop._pending_payload_memory_records = [
+        {
+            "payload": "<svg/onload=alert(1)>",
+            "vuln_type": "xss",
+            "target": "example.com",
+            "param": "q",
+            "success": True,
+            "confidence": 0.9,
+            "status_code": 200,
+            "waf_detected": "",
+            "tech_stack": [],
+            "response_time_ms": 5.0,
+            "error": "",
+            "timestamp": time.time(),
+            "attempts": 1,
+        }
+    ]
+
+    class DummyFuzzer:
+        def __init__(self) -> None:
+            self.payload_memory = PayloadMemoryEngine()
+
+    dummy = DummyFuzzer()
+    loaded = agent_loop._restore_payload_memory_into(dummy)
+
+    assert loaded == 1
+    assert len(dummy.payload_memory.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_or_switch_session_loads_target_persistence(agent_loop, mocker):
+    agent_loop._session = SessionData(target="", session_id="sess-1")
+    agent_loop.state.active_target = "example.com"
+    agent_loop._load_session_persistence = AsyncMock()
+
+    await agent_loop._create_or_switch_session()
+
+    agent_loop._load_session_persistence.assert_awaited_once()
+    assert agent_loop._session.target == "example.com"
 
 
 # ---------------------------------------------------------------------------

@@ -223,6 +223,12 @@ class AgentLoop(
         self._memory_manager = None
         self._memory_health_status: dict[str, Any] = {}
         self._pending_adaptive_state: dict[str, Any] | None = None
+        self._pending_payload_memory_records: list[dict[str, Any]] = []
+        self._payload_memory_records: dict[
+            tuple[str, str, str, str], dict[str, Any]
+        ] = {}
+        self._loaded_session_persistence_target: str = ""
+        self._fuzzer_instance: Any = None
 
         # Attack surface coverage tracker — prevents repetitive testing
         self._surface_tracker: Any = None
@@ -555,6 +561,98 @@ class AgentLoop(
                 logger.warning("Operation failed: %s", e)
                 logger.debug("Token snapshot flush skipped during stop.")
 
+    def _merge_payload_memory_records(self, records: list[dict[str, Any]]) -> int:
+        merged = 0
+        for raw in records:
+            if not isinstance(raw, dict):
+                continue
+
+            payload = str(raw.get("payload", "") or "").strip()
+            vuln_type = str(raw.get("vuln_type", "") or "").strip()
+            target = str(raw.get("target", "") or "").strip()
+            param = str(raw.get("param", "") or "").strip()
+            if not (payload and vuln_type and target and param):
+                continue
+
+            key = (payload, vuln_type, target, param)
+            existing = self._payload_memory_records.get(key)
+            if existing is None:
+                merged_record = dict(raw)
+            else:
+                merged_record = dict(existing)
+                merged_record["attempts"] = max(
+                    int(existing.get("attempts", 1) or 1),
+                    int(raw.get("attempts", 1) or 1),
+                )
+                merged_record["confidence"] = max(
+                    float(existing.get("confidence", 0.0) or 0.0),
+                    float(raw.get("confidence", 0.0) or 0.0),
+                )
+                merged_record["success"] = bool(
+                    existing.get("success", False) or raw.get("success", False)
+                )
+                merged_record["status_code"] = int(
+                    raw.get("status_code", existing.get("status_code", 0)) or 0
+                )
+                merged_record["timestamp"] = max(
+                    float(existing.get("timestamp", 0.0) or 0.0),
+                    float(raw.get("timestamp", 0.0) or 0.0),
+                )
+                merged_record["waf_detected"] = str(
+                    raw.get("waf_detected", existing.get("waf_detected", "")) or ""
+                )
+                merged_record["tech_stack"] = list(
+                    dict.fromkeys(
+                        [
+                            *(
+                                existing.get("tech_stack", [])
+                                if isinstance(existing.get("tech_stack", []), list)
+                                else []
+                            ),
+                            *(
+                                raw.get("tech_stack", [])
+                                if isinstance(raw.get("tech_stack", []), list)
+                                else []
+                            ),
+                        ]
+                    )
+                )
+            self._payload_memory_records[key] = merged_record
+            merged += 1
+
+        if self._payload_memory_records:
+            self._pending_payload_memory_records = list(
+                self._payload_memory_records.values()
+            )
+        return merged
+
+    def _restore_payload_memory_into(self, fuzzer_like: Any) -> int:
+        payload_memory = getattr(fuzzer_like, "payload_memory", None)
+        if payload_memory is None or not self._pending_payload_memory_records:
+            return 0
+        try:
+            loaded = payload_memory.load_records(self._pending_payload_memory_records)
+        except Exception as exc:
+            logger.debug("Payload memory restore failed: %s", exc)
+            return 0
+        if loaded:
+            logger.info("Payload memory restored into fuzzer: %d records", loaded)
+        return loaded
+
+    def _capture_payload_memory_from(self, fuzzer_like: Any) -> int:
+        payload_memory = getattr(fuzzer_like, "payload_memory", None)
+        if payload_memory is None:
+            return 0
+        try:
+            records = payload_memory.dump_records()
+        except Exception as exc:
+            logger.debug("Payload memory export failed: %s", exc)
+            return 0
+        merged = self._merge_payload_memory_records(records)
+        if merged:
+            logger.debug("Captured %d payload memory records from fuzzer", merged)
+        return merged
+
     async def _save_session_persistence(self) -> None:
         """Save payload memory and adaptive learning state to workspace."""
         try:
@@ -571,13 +669,15 @@ class AgentLoop(
             self._session_persistence = persist
 
             # Save payload memory from fuzzer
-            payload_records = []
-            if hasattr(self, "_fuzzer_instance") and self._fuzzer_instance:
-                pm = getattr(self._fuzzer_instance, "payload_memory", None)
-                if pm and pm.records:
-                    from dataclasses import asdict
-
-                    payload_records = [asdict(r) for r in pm.records.values()]
+            payload_records = list(self._pending_payload_memory_records)
+            if (
+                hasattr(self, "_fuzzer_instance")
+                and self._fuzzer_instance
+                and str(getattr(self._fuzzer_instance, "target", "") or "").strip()
+                == str(self._session.target or "").strip()
+            ):
+                self._capture_payload_memory_from(self._fuzzer_instance)
+                payload_records = list(self._pending_payload_memory_records)
             if payload_records:
                 persist.save_payload_memory(self._session.target, payload_records)
 
@@ -628,6 +728,11 @@ class AgentLoop(
                 return
             if not self._session or not self._session.target:
                 return
+            target = str(self._session.target or "").strip()
+            if not target:
+                return
+            if self._loaded_session_persistence_target == target:
+                return
 
             from .session_persistence import SessionPersistenceEngine
 
@@ -636,23 +741,25 @@ class AgentLoop(
             self._session_persistence = persist
 
             # Load payload memory into fuzzer
-            records = persist.load_payload_memory(self._session.target)
+            records = persist.load_payload_memory(target)
             if records:
+                self._merge_payload_memory_records(records)
                 # Will be loaded when fuzzer is created
                 logger.info(
                     "Payload memory available: %d records for %s",
                     len(records),
-                    self._session.target,
+                    target,
                 )
 
             # Load adaptive learning state
-            adaptive_state = persist.load_adaptive_state(self._session.target)
+            adaptive_state = persist.load_adaptive_state(target)
             if adaptive_state:
                 self._pending_adaptive_state = adaptive_state
                 self._ensure_adaptive_learning_engine()
                 logger.info(
-                    "Adaptive learning state loaded for %s", self._session.target
+                    "Adaptive learning state loaded for %s", target
                 )
+            self._loaded_session_persistence_target = target
         except Exception as e:
             logger.warning("Operation failed: %s", e)
 

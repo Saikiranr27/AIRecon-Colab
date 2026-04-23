@@ -643,9 +643,7 @@ class _CyclePostMixin:
             )
             self._track_tool_usage(tool_name, arguments)
 
-            _duration = float(
-                result.get("duration", 0.0) if isinstance(result, dict) else 0.0
-            )
+            _duration = float(duration)
             _output_size = len(
                 str(result.get("stdout", "") or result.get("result", ""))
                 if isinstance(result, dict)
@@ -772,6 +770,14 @@ class _CyclePostMixin:
                 output_file,
             )
             self._update_objectives_from_session(phase_after_tool)
+            if hasattr(self, "_save_new_findings_to_memory"):
+                try:
+                    self._save_new_findings_to_memory()
+                except Exception as _finding_sync_err:
+                    logger.debug(
+                        "Failed to sync findings into memory DB: %s",
+                        _finding_sync_err,
+                    )
             meaningful_after = sum(
                 1
                 for e in self.state.evidence_log

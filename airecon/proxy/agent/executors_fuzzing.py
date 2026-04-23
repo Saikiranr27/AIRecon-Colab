@@ -165,6 +165,7 @@ class _FuzzingExecutorMixin:
         auth_login_url, auth_username, auth_password, auth_extra_fields = _parse_auth(
             arguments
         )
+        fuzzer = None
 
         try:
             async with Fuzzer(
@@ -173,6 +174,9 @@ class _FuzzingExecutorMixin:
                 headers=self._build_fuzz_headers(),
                 auth_login_url=auth_login_url,
             ) as fuzzer:
+                self._fuzzer_instance = fuzzer
+                if hasattr(self, "_restore_payload_memory_into"):
+                    self._restore_payload_memory_into(fuzzer)
                 if isinstance(auth_username, str) and isinstance(auth_password, str):
                     fuzzer.set_auth_credentials(
                         auth_username,
@@ -206,6 +210,9 @@ class _FuzzingExecutorMixin:
                 self, tool_name, arguments, res_dict, start_time, success=False
             )
             return False, time.time() - start_time, res_dict, None
+        finally:
+            if fuzzer is not None and hasattr(self, "_capture_payload_memory_from"):
+                self._capture_payload_memory_from(fuzzer)
 
         _record_fuzz_surface(self, arguments, results, success=True)
         return True, time.time() - start_time, res_dict, None
@@ -226,24 +233,46 @@ class _FuzzingExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        from ..fuzzer import quick_fuzz_url
+        from ..fuzzer import Fuzzer
 
         self._last_output_file = None
         start_time = time.time()
         target = arguments.get("target", "")
         params = arguments.get("params") or None
         cfg = get_config()
+        fuzzer = None
 
         if not self._is_target_in_scope(target):
             return _handle_oos(self, tool_name, arguments, target, start_time)
 
         try:
-            results = await asyncio.wait_for(
-                quick_fuzz_url(
-                    url=target, params=params, headers=self._build_fuzz_headers()
-                ),
-                timeout=float(getattr(cfg, "fuzzer_quick_timeout_seconds", 300.0)),
-            )
+            async with Fuzzer(
+                target,
+                threads=int(getattr(cfg, "fuzzer_threads", 10)),
+                timeout=int(getattr(cfg, "fuzzer_timeout", 30)),
+                headers=self._build_fuzz_headers(),
+            ) as fuzzer:
+                self._fuzzer_instance = fuzzer
+                if hasattr(self, "_restore_payload_memory_into"):
+                    self._restore_payload_memory_into(fuzzer)
+                results = await asyncio.wait_for(
+                    fuzzer.fuzz_parameters(
+                        params=params or ["q", "search", "id", "page"],
+                        vuln_types=[
+                            "sql_injection",
+                            "xss",
+                            "path_traversal",
+                            "ssti",
+                        ],
+                        max_payloads_per_type=int(
+                            getattr(cfg, "fuzzer_quick_max_payloads_per_type", 0)
+                            or 0
+                        ),
+                    ),
+                    timeout=float(
+                        getattr(cfg, "fuzzer_quick_timeout_seconds", 300.0)
+                    ),
+                )
 
             if not results:
                 res_dict = {"success": True, "result": NO_FUZZING_RESULT}
@@ -295,6 +324,9 @@ class _FuzzingExecutorMixin:
                 self, tool_name, arguments, res_dict, start_time, success=False
             )
             return False, time.time() - start_time, res_dict, None
+        finally:
+            if fuzzer is not None and hasattr(self, "_capture_payload_memory_from"):
+                self._capture_payload_memory_from(fuzzer)
 
         return True, time.time() - start_time, res_dict, None
 
@@ -335,6 +367,9 @@ class _FuzzingExecutorMixin:
                 headers=self._build_fuzz_headers(),
                 auth_login_url=auth_login_url,
             )
+            self._fuzzer_instance = tester.fuzzer
+            if hasattr(self, "_restore_payload_memory_into"):
+                self._restore_payload_memory_into(tester.fuzzer)
             if isinstance(auth_username, str) and isinstance(auth_password, str):
                 tester.fuzzer.set_auth_credentials(
                     auth_username,
@@ -386,6 +421,8 @@ class _FuzzingExecutorMixin:
             return False, time.time() - start_time, res_dict, None
         finally:
             if tester is not None:
+                if hasattr(self, "_capture_payload_memory_from"):
+                    self._capture_payload_memory_from(tester.fuzzer)
                 try:
                     await tester.fuzzer.close()
                 except Exception as _e:

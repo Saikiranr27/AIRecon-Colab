@@ -114,6 +114,7 @@ class _LifecycleMixin:
         if _target:
             try:
                 memory = get_memory_manager()
+                self._memory_manager = memory
                 _memory_context = memory.get_context_for_small_model(
                     target=_target,
                     current_phase=self._session.current_phase
@@ -195,13 +196,14 @@ class _LifecycleMixin:
         if _session_id:
             # _loop_module = get_loop_module()
             self._session = _loop_module.load_session(_session_id) or SessionData(
-                session_id=_session_id, target=""
+                session_id=_session_id,
+                target=target or "",
             )
             logger.info(
                 "Loaded session %s (target=%s)", _session_id, self._session.target
             )
         else:
-            self._session = SessionData(target="")
+            self._session = SessionData(target=target or "")
             logger.info("Created new session %s", self._session.session_id)
         self._sync_recovery_state_from_session()
         self._sync_token_usage_from_session()

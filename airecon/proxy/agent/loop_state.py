@@ -170,6 +170,83 @@ class _StateMixin:
         except Exception as e:
             logger.debug("[DEBUG-MEMORY] Real-time memory save failed: %s", e)
 
+    def _save_new_findings_to_memory(self) -> int:
+        if not self._session or not self._session.target or not self._session.session_id:
+            return 0
+
+        if self._memory_manager is None:
+            try:
+                from ..memory import get_memory_manager
+
+                self._memory_manager = get_memory_manager()
+            except Exception as exc:
+                logger.debug("Memory manager init failed for findings sync: %s", exc)
+                return 0
+
+        if not self._memory_manager:
+            return 0
+
+        persisted: set[tuple[str, str, str, str]] = set(
+            getattr(self, "_persisted_memory_finding_keys", set())
+        )
+        saved = 0
+
+        for vuln in self._session.vulnerabilities:
+            if not isinstance(vuln, dict):
+                continue
+
+            finding_type = str(
+                vuln.get("type")
+                or vuln.get("finding")
+                or vuln.get("title")
+                or "vulnerability"
+            ).strip()
+            url = str(vuln.get("url") or vuln.get("endpoint") or vuln.get("path") or "").strip()
+            parameter = str(vuln.get("parameter") or vuln.get("param") or "").strip()
+            description = str(
+                vuln.get("description")
+                or vuln.get("technical_analysis")
+                or vuln.get("title")
+                or vuln.get("finding")
+                or ""
+            ).strip()
+            signature = (
+                finding_type.lower(),
+                url.lower(),
+                parameter.lower(),
+                description[:160].lower(),
+            )
+            if signature in persisted:
+                continue
+
+            evidence = vuln.get("evidence", [])
+            if not isinstance(evidence, list):
+                evidence = [str(evidence)] if str(evidence).strip() else []
+            proof = str(vuln.get("proof", "") or "").strip()
+            if proof:
+                evidence = [*evidence, proof[:500]]
+
+            self._memory_manager.save_finding(
+                {
+                    "session_id": self._session.session_id,
+                    "target": self._session.target,
+                    "type": finding_type or "vulnerability",
+                    "severity": str(vuln.get("severity", "Medium") or "Medium"),
+                    "url": url,
+                    "parameter": parameter,
+                    "description": description[:500],
+                    "evidence": evidence[:10],
+                    "cwe_id": vuln.get("cwe_id"),
+                    "cvss_score": vuln.get("cvss_score"),
+                    "remediation": str(vuln.get("remediation", "") or "")[:500],
+                }
+            )
+            persisted.add(signature)
+            saved += 1
+
+        self._persisted_memory_finding_keys = persisted  # type: ignore[attr-defined]
+        return saved
+
     def _save_recon_exploit_pattern(
         self,
         technique_name: str,

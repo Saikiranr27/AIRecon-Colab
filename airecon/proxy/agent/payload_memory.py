@@ -143,15 +143,80 @@ class PayloadMemoryEngine:
         candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
         return [(p, round(s, 3)) for p, s, _ in candidates[:top_n]]
 
+    def prioritize_payloads(
+        self,
+        payloads: list[str],
+        vuln_type: str,
+        target: str = "",
+        waf: str = "",
+        tech: str = "",
+    ) -> list[str]:
+        preferred = [
+            payload
+            for payload, _score in self.get_successful_payloads(
+                vuln_type=vuln_type,
+                target=target,
+                waf=waf,
+                tech=tech,
+                top_n=max(10, len(payloads) + 5),
+            )
+        ]
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for payload in preferred + list(payloads):
+            if payload in seen:
+                continue
+            seen.add(payload)
+            ordered.append(payload)
+        return ordered
+
     def save(self, path: str | Path) -> None:
         data = {
             "version": "1.0.0",
             "saved_at": time.time(),
-            "records": [asdict(r) for r in self.records.values()],
+            "records": self.dump_records(),
         }
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def dump_records(self) -> list[dict[str, Any]]:
+        return [asdict(r) for r in self.records.values()]
+
+    def load_records(self, records: list[dict[str, Any]]) -> int:
+        loaded = 0
+        for rdata in records:
+            if not isinstance(rdata, dict):
+                continue
+            if rdata.get("timestamp", 0) < time.time() - self.ttl_seconds:
+                continue
+            try:
+                record = PayloadRecord(**rdata)
+            except Exception as exc:
+                logger.debug("Skipping invalid payload memory record: %s", exc)
+                continue
+
+            existing = self.records.get(record.payload_hash)
+            if existing is None:
+                self.records[record.payload_hash] = record
+            else:
+                existing.attempts = max(existing.attempts, record.attempts)
+                existing.confidence = max(existing.confidence, record.confidence)
+                existing.success = existing.success or record.success
+                existing.status_code = record.status_code or existing.status_code
+                existing.timestamp = max(existing.timestamp, record.timestamp)
+                if record.waf_detected:
+                    existing.waf_detected = record.waf_detected
+                if record.tech_stack:
+                    existing.tech_stack = list(
+                        dict.fromkeys(existing.tech_stack + record.tech_stack)
+                    )
+            loaded += 1
+
+        if len(self.records) > self.max_records:
+            self._prune()
+        return loaded
 
     def load(self, path: str | Path) -> int:
         path = Path(path)
@@ -159,14 +224,7 @@ class PayloadMemoryEngine:
             return 0
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            loaded = 0
-            for rdata in data.get("records", []):
-                if rdata.get("timestamp", 0) < time.time() - self.ttl_seconds:
-                    continue
-                record = PayloadRecord(**rdata)
-                self.records[record.payload_hash] = record
-                loaded += 1
-            return loaded
+            return self.load_records(data.get("records", []))
         except Exception as exc:
             logger.warning("Failed to load payload memory: %s", exc)
             return 0

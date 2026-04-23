@@ -1169,9 +1169,11 @@ class _ExplorationMixin:
 
             tech_summary = ", ".join(session_techs.keys()) if session_techs else ""
 
-            context = {"phase": phase}
+            context: dict[str, str] = {"phase": str(phase).strip().upper()}
             for tech_name in session_techs:
-                context[f"tech={tech_name}"] = "detected"
+                _tech_key = str(tech_name).strip().lower()
+                if _tech_key:
+                    context[f"tech={_tech_key}"] = "detected"
 
             engine.record_tool_result(
                 tool_name=tool_name,
@@ -1392,6 +1394,11 @@ class _ExplorationMixin:
                     })
                     _persisted_hyps.add(_hid)
             self._persisted_hyp_ids = _persisted_hyps  # type: ignore[attr-defined]
+
+        try:
+            store.save(target)
+        except Exception as exc:
+            logger.debug("Target memory save failed for %s: %s", target, exc)
 
         if getattr(self, "_target_mem_save_counter", 0) % 15 == 0:
             for norm, tm in store._cache.items():

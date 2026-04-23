@@ -778,22 +778,87 @@ class MemoryManager:
         if not self.conn:
             return
 
+        category = str(knowledge.get("category") or "general").strip().lower()
+        title = str(knowledge.get("title") or "").strip()
+        content = str(knowledge.get("content") or "").strip()
+        if not title or not content:
+            return
+
+        confidence = max(0.0, min(float(knowledge.get("confidence", 1.0)), 1.0))
+        source_session = str(knowledge.get("source_session") or "").strip() or None
+        raw_tags = knowledge.get("tags", [])
+        tags: list[str] = []
+        seen_tags: set[str] = set()
+        if isinstance(raw_tags, list):
+            for item in raw_tags:
+                tag = str(item or "").strip().lower()
+                if not tag or tag in seen_tags:
+                    continue
+                seen_tags.add(tag)
+                tags.append(tag)
+
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            INSERT INTO knowledge
-            (category, title, content, confidence, source_session, tags)
-            VALUES (?, ?, ?, ?, ?, ?)
+            SELECT id, content, confidence, source_session, tags
+            FROM knowledge
+            WHERE category = ? AND title = ?
+            ORDER BY confidence DESC, created_at DESC
+            LIMIT 1
         """,
-            (
-                knowledge.get("category"),
-                knowledge.get("title"),
-                knowledge.get("content"),
-                knowledge.get("confidence", 1.0),
-                knowledge.get("source_session"),
-                json.dumps(knowledge.get("tags", [])),
-            ),
+            (category, title),
         )
+
+        existing = cursor.fetchone()
+        if existing:
+            merged_tags: list[str] = []
+            merged_seen: set[str] = set()
+            try:
+                existing_tags = json.loads(existing["tags"] or "[]")
+            except Exception:
+                existing_tags = []
+            for item in [*existing_tags, *tags]:
+                tag = str(item or "").strip().lower()
+                if not tag or tag in merged_seen:
+                    continue
+                merged_seen.add(tag)
+                merged_tags.append(tag)
+
+            merged_content = content
+            existing_content = str(existing["content"] or "").strip()
+            if existing_content and len(existing_content) > len(merged_content):
+                merged_content = existing_content
+
+            cursor.execute(
+                """
+                UPDATE knowledge
+                SET content = ?, confidence = ?, source_session = ?, tags = ?
+                WHERE id = ?
+            """,
+                (
+                    merged_content,
+                    max(confidence, float(existing["confidence"] or 0.0)),
+                    source_session or existing["source_session"],
+                    json.dumps(merged_tags),
+                    existing["id"],
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO knowledge
+                (category, title, content, confidence, source_session, tags)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    category,
+                    title,
+                    content,
+                    confidence,
+                    source_session,
+                    json.dumps(tags),
+                ),
+            )
         self.conn.commit()
 
     def get_knowledge(self, category: str | None = None, limit: int = 50) -> list[dict]:
@@ -927,12 +992,23 @@ class MemoryManager:
                         context_parts.append(line)
                         tokens_used += len(line) // 4
 
-        if current_phase == "EXPLOIT" and tokens_used < max_tokens * 0.85:
-            knowledge = self.get_knowledge("exploitation", limit=10)  # Increased from 5
-            if knowledge:
-                context_parts.append("\n## EXPLOITATION TIPS (From Past Successes)")
-                for k in knowledge[:5]: 
-                    line = f"- {k['content'][:150]}"
+        phase_knowledge_map = {
+            "RECON": ("reconnaissance", "## RECONNAISSANCE LESSONS"),
+            "ANALYSIS": ("analysis", "## ANALYSIS LESSONS"),
+            "EXPLOIT": ("exploitation", "## EXPLOITATION TIPS (From Past Successes)"),
+            "REPORT": ("reporting", "## REPORTING LESSONS"),
+        }
+        phase_norm = str(current_phase or "").strip().upper()
+        knowledge_category, knowledge_header = phase_knowledge_map.get(
+            phase_norm,
+            ("", ""),
+        )
+        if knowledge_category and tokens_used < max_tokens * 0.85:
+            phase_knowledge = self.get_knowledge(knowledge_category, limit=10)
+            if phase_knowledge:
+                context_parts.append(f"\n{knowledge_header}")
+                for k in phase_knowledge[:5]:
+                    line = f"- {k['title']}: {k['content'][:140]}"
                     context_parts.append(line)
                     tokens_used += len(line) // 4
 
@@ -1361,6 +1437,104 @@ class MemoryManager:
                     0 if success else 1,
                     duration_sec,
                     output_size,
+                ),
+            )
+
+        self.conn.commit()
+
+    def record_model_performance(
+        self,
+        model_name: str,
+        task_type: str | None,
+        response_time_sec: float,
+        success: bool,
+        context_size_used: int = 0,
+    ) -> None:
+        if not self.conn:
+            return
+
+        model_name = str(model_name or "").strip()
+        if not model_name:
+            return
+
+        task_type_norm = str(task_type or "").strip().lower() or None
+        response_time_sec = max(0.0, float(response_time_sec or 0.0))
+        context_size_used = max(0, int(context_size_used or 0))
+
+        cursor = self.conn.cursor()
+        if task_type_norm is None:
+            cursor.execute(
+                """
+                SELECT id, avg_response_time_sec, success_rate, total_requests, context_size_used
+                FROM model_performance
+                WHERE model_name = ? AND task_type IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+            """,
+                (model_name,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, avg_response_time_sec, success_rate, total_requests, context_size_used
+                FROM model_performance
+                WHERE model_name = ? AND task_type = ?
+                ORDER BY id DESC
+                LIMIT 1
+            """,
+                (model_name, task_type_norm),
+            )
+
+        existing = cursor.fetchone()
+        if existing:
+            prev_total = int(existing["total_requests"] or 0)
+            new_total = prev_total + 1
+            prev_successes = float(existing["success_rate"] or 0.0) * prev_total
+            new_success_rate = (prev_successes + (1.0 if success else 0.0)) / max(
+                new_total, 1
+            )
+            new_avg_time = (
+                (float(existing["avg_response_time_sec"] or 0.0) * prev_total)
+                + response_time_sec
+            ) / max(new_total, 1)
+            new_avg_context = int(
+                round(
+                    (
+                        (int(existing["context_size_used"] or 0) * prev_total)
+                        + context_size_used
+                    )
+                    / max(new_total, 1)
+                )
+            )
+            cursor.execute(
+                """
+                UPDATE model_performance
+                SET avg_response_time_sec = ?, success_rate = ?, total_requests = ?,
+                    context_size_used = ?, last_used = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """,
+                (
+                    new_avg_time,
+                    new_success_rate,
+                    new_total,
+                    new_avg_context,
+                    existing["id"],
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO model_performance
+                (model_name, task_type, avg_response_time_sec, success_rate, total_requests, context_size_used)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    model_name,
+                    task_type_norm,
+                    response_time_sec,
+                    1.0 if success else 0.0,
+                    1,
+                    context_size_used,
                 ),
             )
 

@@ -398,11 +398,20 @@ class _MessageEntryMixin:
             if self.state.active_target
             else (self._session.target if self._session else "")
         )
+        _memory_manager = getattr(self, "_memory_manager", None)
+        if _memory_manager is None and _current_target:
+            try:
+                from ..memory import get_memory_manager
+
+                _memory_manager = get_memory_manager()
+                self._memory_manager = _memory_manager
+            except Exception as exc:
+                logger.debug("Memory manager lazy init failed: %s", exc)
         skill_context, loaded_skills = auto_load_skills_for_message(
             user_message,
             phase=_skill_phase,
             session_loaded_skills=_session_skills,
-            memory_manager=getattr(self, "_memory_manager", None),
+            memory_manager=_memory_manager,
             current_target=_current_target,
         )
         if loaded_skills:
@@ -494,3 +503,12 @@ class _MessageEntryMixin:
             _session_changed = True
         if _session_changed and self._ctf_mode and self.pipeline:
             self.pipeline.set_ctf_mode(True)
+        if _session_changed:
+            self._loaded_session_persistence_target = ""
+            self._pending_payload_memory_records = []
+            self._payload_memory_records = {}
+            self._fuzzer_instance = None
+            if self._session and self._session.target and hasattr(
+                self, "_load_session_persistence"
+            ):
+                await self._load_session_persistence()

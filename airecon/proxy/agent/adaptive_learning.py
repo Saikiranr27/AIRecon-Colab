@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from ..memory import (
+    MemoryManager,
+    _init_schema,
     configure_sqlite_connection,
     get_sqlite_timeout_seconds,
     rollup_tool_usage_rows,
@@ -54,6 +56,7 @@ def _open_memory_db(read_only: bool) -> sqlite3.Connection:
             timeout=timeout,
         )
     else:
+        _MEMORY_DB.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(_MEMORY_DB), timeout=timeout)
     configure_sqlite_connection(conn)
     conn.row_factory = sqlite3.Row
@@ -251,8 +254,8 @@ class AdaptiveLearningEngine:
             for row in cur.fetchall():
                 conditions: dict[str, Any] = {}
                 if row["target_tech"]:
-                    conditions["tech"] = str(row["target_tech"])
-                conditions["phase"] = str(row["pattern_type"])
+                    conditions["tech"] = str(row["target_tech"]).strip().lower()
+                conditions["phase"] = str(row["pattern_type"]).strip().upper()
 
                 technique = str(row["technique_name"])
                 pattern_id = self._make_pattern_id(conditions, [technique])
@@ -332,6 +335,107 @@ class AdaptiveLearningEngine:
             logger.debug("Failed to save learning state: %s", exc)
         finally:
             self._sync_to_memory_db()
+
+    def _normalize_conditions(self, conditions: dict[str, Any] | None) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in (conditions or {}).items():
+            key_name = str(key or "").strip().lower()
+            if not key_name:
+                continue
+            normalized[key_name] = self._normalize_condition_value(key_name, value)
+        return normalized
+
+    def _store_learned_insight(
+        self,
+        insight: LearnedInsight,
+    ) -> tuple[LearnedInsight, bool]:
+        for existing in self.learned_insights:
+            if existing.insight_id != insight.insight_id:
+                continue
+            existing.title = insight.title or existing.title
+            existing.description = insight.description or existing.description
+            existing.recommendation = insight.recommendation or existing.recommendation
+            existing.category = insight.category or existing.category
+            existing.conditions.update(insight.conditions or {})
+            existing.confidence = max(existing.confidence, insight.confidence)
+            existing.observation_count = max(
+                existing.observation_count,
+                insight.observation_count,
+            )
+            existing.last_updated = max(existing.last_updated, insight.last_updated)
+            existing.session_ids = sorted(
+                {
+                    str(session_id)
+                    for session_id in [*existing.session_ids, *insight.session_ids]
+                    if str(session_id).strip()
+                }
+            )
+            return existing, False
+
+        self.learned_insights.append(insight)
+        return insight, True
+
+    def _knowledge_category_for_insight(self, insight: LearnedInsight) -> str:
+        phase = str(insight.conditions.get("phase") or "").strip().upper()
+        if phase == "RECON":
+            return "reconnaissance"
+        if phase == "ANALYSIS":
+            return "analysis"
+        if phase == "EXPLOIT":
+            return "exploitation"
+        if phase == "REPORT":
+            return "reporting"
+
+        category_map = {
+            "tool_tech": "reconnaissance",
+            "vuln_pattern": "analysis",
+            "exploit_chain": "exploitation",
+            "doc_pattern": "reporting",
+        }
+        return category_map.get(str(insight.category or "").strip().lower(), "general")
+
+    def _knowledge_payload_for_insight(
+        self,
+        insight: LearnedInsight,
+    ) -> dict[str, Any]:
+        tags = [
+            "adaptive_learning",
+            "distilled_insight",
+            f"insight:{str(insight.category or 'unknown').strip().lower()}",
+        ]
+        for key, value in sorted((insight.conditions or {}).items()):
+            if value in ("", None):
+                continue
+            tags.append(f"{str(key).strip().lower()}:{str(value).strip().lower()}")
+
+        return {
+            "category": self._knowledge_category_for_insight(insight),
+            "title": insight.title,
+            "content": insight.recommendation or insight.description or insight.title,
+            "confidence": max(0.0, min(float(insight.confidence or 0.0), 1.0)),
+            "source_session": self.session_id,
+            "tags": tags,
+        }
+
+    def _persist_insights_to_memory_db(self, insights: list[LearnedInsight]) -> None:
+        if not insights:
+            return
+
+        try:
+            conn = _open_memory_db(read_only=False)
+            _init_schema(conn)
+            memory = MemoryManager()
+            memory.conn = conn
+            try:
+                for insight in insights:
+                    memory.save_knowledge(self._knowledge_payload_for_insight(insight))
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug(
+                "Failed to persist distilled insights to memory DB: %s",
+                exc,
+            )
 
     def _sync_to_memory_db(self) -> None:
         """Sync learned tool performance back to ~/.airecon/memory/airecon.db."""
@@ -820,25 +924,33 @@ class AdaptiveLearningEngine:
             new_insights = _parse_insights_json(raw_answer)
             added: list[LearnedInsight] = []
             for ins in new_insights:
+                conditions = self._normalize_conditions(ins.get("conditions", {}))
+                now = time.time()
                 insight = LearnedInsight(
-                    insight_id=self._make_pattern_id(ins.get("conditions", {}), [ins.get("title", "")]),
+                    insight_id=self._make_pattern_id(
+                        conditions,
+                        [ins.get("title", "")],
+                    ),
                     category=ins.get("category", "unknown"),
                     title=ins.get("title", ""),
                     description=ins.get("recommendation", ""),
-                    conditions=ins.get("conditions", {}),
+                    conditions=conditions,
                     recommendation=ins.get("recommendation", ""),
                     confidence=0.6,
                     observation_count=len(new_obs),
-                    created_at=time.time(),
-                    last_updated=time.time(),
+                    created_at=now,
+                    last_updated=now,
                     session_ids=[self.session_id],
                 )
-                self.learned_insights.append(insight)
-                added.append(insight)
+                stored, created = self._store_learned_insight(insight)
+                if not created:
+                    continue
+                added.append(stored)
                 logger.info(
                     "[AdaptiveLearning] New insight distilled: %s",
-                    insight.title,
+                    stored.title,
                 )
+            self._persist_insights_to_memory_db(added)
             return added
 
         except Exception as exc:
@@ -870,14 +982,17 @@ class AdaptiveLearningEngine:
             score = perf.effectiveness_score
 
             if phase:
-                phase_key = f"phase={phase}"
+                phase_key = f"phase={str(phase).strip().upper()}"
                 if phase_key in perf.context_scores:
                     score = (score * 0.7) + (perf.context_scores[phase_key] * 0.3)
 
             if tech_stack:
                 for tech in tech_stack:
-                    tech_key = f"tech={tech}"
-                    if tech_key in perf.context_scores:
+                    tech_key = f"tech={str(tech).strip().lower()}"
+                    if (
+                        tech_key in perf.context_scores
+                        or f"{tech_key}=detected" in perf.context_scores
+                    ):
                         score = min(1.0, score + 0.1)
 
             if target_type and target_type in perf.target_type_scores:
@@ -895,16 +1010,28 @@ class AdaptiveLearningEngine:
     ) -> StrategyPattern | None:
         best: StrategyPattern | None = None
         best_score = 0.0
+        normalized_conditions = {
+            str(key).strip().lower(): self._normalize_condition_value(key, value)
+            for key, value in conditions.items()
+            if str(key).strip()
+        }
 
         for pattern in self.strategy_patterns:
             if pattern.reliability < min_reliability:
                 continue
+            normalized_pattern_conditions = {
+                str(key).strip().lower(): self._normalize_condition_value(key, value)
+                for key, value in pattern.conditions.items()
+                if str(key).strip()
+            }
 
             match_count = sum(
-                1 for key, value in conditions.items()
-                if key in pattern.conditions and pattern.conditions[key] == value
+                1
+                for key, value in normalized_conditions.items()
+                if key in normalized_pattern_conditions
+                and normalized_pattern_conditions[key] == value
             )
-            total_conditions = len(conditions)
+            total_conditions = len(normalized_conditions)
             if total_conditions == 0:
                 continue
 
@@ -983,6 +1110,18 @@ class AdaptiveLearningEngine:
                 reverse=True,
             )[:5],
         }
+
+    @staticmethod
+    def _normalize_condition_value(key: Any, value: Any) -> Any:
+        key_name = str(key).strip().lower()
+        if isinstance(value, str):
+            text = value.strip()
+            if key_name == "phase":
+                return text.upper()
+            if key_name == "tech":
+                return text.lower()
+            return text.lower()
+        return value
 
     @staticmethod
     def _make_pattern_id(conditions: dict, tool_sequence: list[str]) -> str:
