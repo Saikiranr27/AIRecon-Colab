@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # AIRecon-Colab
 
 > AI-powered security reconnaissance using **AIRecon**, **Google Colab**, **Ollama (Qwen3.5:9B)**, and **Cloudflare Tunnel**.
@@ -365,3 +366,5 @@ My contributions include:
 # 📄 License
 
 This repository follows the original AIRecon project license (MIT).
+=======
+>>>>>>> 153dbd6 (Updated README and added project screenshots)
