@@ -1,57 +1,75 @@
 # AIRecon-Colab
 
-## 🚀 AI-Powered Security Reconnaissance using Google Colab, Ollama & Cloudflare Tunnel
+> AI-powered security reconnaissance using **AIRecon**, **Google Colab**, **Ollama (Qwen3.5:9B)**, and **Cloudflare Tunnel**.
 
-AIRecon-Colab demonstrates how to run AIRecon using a remote Large Language Model (LLM) hosted on **Google Colab GPU** and securely connected to **Kali Linux** through **Cloudflare Tunnel**.
-
-This project shows how AI can assist penetration testing by combining traditional security tools (Nmap, HTTP analysis, browser automation) with an LLM for intelligent analysis and reporting.
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![Platform](https://img.shields.io/badge/OS-Kali%20Linux-success)
+![LLM](https://img.shields.io/badge/LLM-Qwen3.5%209B-orange)
+![GPU](https://img.shields.io/badge/GPU-Tesla%20T4-red)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
 
-# 📌 Features
+# 📖 Overview
 
-- AI-assisted penetration testing
-- Google Colab GPU (Tesla T4)
-- Ollama remote inference
-- Cloudflare Tunnel integration
-- Docker sandbox
+This repository demonstrates how to run **AIRecon** with a **remote Ollama server hosted on Google Colab** using a **Tesla T4 GPU** and securely connect it to **Kali Linux** through **Cloudflare Tunnel**.
+
+The project explores AI-assisted security reconnaissance by combining traditional penetration testing tools with a Large Language Model (LLM) for intelligent reasoning and reporting.
+
+---
+
+# ✨ Features
+
+- AI-assisted reconnaissance
+- Remote Ollama inference
+- Google Colab GPU integration
+- Cloudflare Tunnel connectivity
+- Docker sandbox execution
 - Nmap integration
-- HTTP Observe
-- Browser Automation
-- Technology Fingerprinting
-- Service Detection
-- Open Port Discovery
-- CVE Identification
-- Security Header Analysis
-- Interactive AIRecon TUI
-- AI-generated Security Reports
+- HTTP observation
+- Browser automation
+- Open port discovery
+- Service detection
+- Technology fingerprinting
+- Security header analysis
+- CVE identification
+- AI-generated security reports
 
 ---
 
 # 🏗 Architecture
 
-                    Google Colab
-                 (Tesla T4 GPU)
+```text
+                   Google Colab
+                (Tesla T4 GPU)
 
-                        │
+                       │
 
-                Ollama (Qwen3.5:9B)
+               Ollama (Qwen3.5:9B)
 
-                        │
+                       │
 
-             Cloudflare Tunnel (HTTPS)
+          Cloudflare Tunnel (HTTPS)
 
-                        │
+                       │
 
-                 Kali Linux (AIRecon)
+             Kali Linux (AIRecon)
 
-                        │
+                       │
 
-        Nmap • Browser • HTTP Observe
+       ┌────────┬─────────┬──────────┐
+       │        │         │
+       ▼        ▼         ▼
+     Nmap   HTTP Observe  Browser
 
-                        │
+                       │
 
-               AI Security Assessment
+                 AI Analysis
+
+                       │
+
+              Security Report
+```
 
 ---
 
@@ -59,15 +77,15 @@ This project shows how AI can assist penetration testing by combining traditiona
 
 | Component | Technology |
 |-----------|------------|
-| OS | Kali Linux |
+| Operating System | Kali Linux |
 | Language | Python |
-| AI Model | Qwen3.5:9B |
+| AI Framework | AIRecon |
+| LLM | Qwen3.5:9B |
 | LLM Server | Ollama |
-| GPU | Google Colab Tesla T4 |
+| GPU | Google Colab (Tesla T4) |
 | Tunnel | Cloudflare Tunnel |
 | Container | Docker |
 | Scanner | Nmap |
-| Framework | AIRecon |
 
 ---
 
@@ -77,21 +95,15 @@ This project shows how AI can assist penetration testing by combining traditiona
 
 ```bash
 git clone https://github.com/Saikiranr27/AIRecon-Colab.git
-
 cd AIRecon-Colab
 ```
-
----
 
 ## Create Virtual Environment
 
 ```bash
 python3 -m venv venv
-
 source venv/bin/activate
 ```
-
----
 
 ## Install Dependencies
 
@@ -105,8 +117,6 @@ or
 pip install -r requirements.txt
 ```
 
----
-
 ## Verify Installation
 
 ```bash
@@ -117,38 +127,20 @@ python -m airecon status
 
 # ☁ Google Colab Setup
 
-1. Open the Colab Notebook.
-2. Enable GPU Runtime.
+1. Open the AIRecon Colab notebook.
+2. Enable **GPU Runtime**.
 3. Start Ollama.
-4. Load Qwen3.5:9B.
-5. Start Cloudflare Tunnel.
-6. Copy the Tunnel URL.
+4. Load the **Qwen3.5:9B** model.
+5. Start the Cloudflare Tunnel.
+6. Copy the generated Tunnel URL.
+7. Update `~/.airecon/config.yaml`.
 
 Example:
 
-```
-https://xxxxx.trycloudflare.com
-```
-
----
-
-# 🔧 Configure AIRecon
-
-Update:
-
-```
-~/.airecon/config.yaml
-```
-
-Example
-
 ```yaml
 ollama_url: "https://xxxxx.trycloudflare.com"
-
 ollama_model: "qwen3.5:9b"
-
 ollama_timeout: 300
-
 ollama_chunk_timeout: 300
 ```
 
@@ -164,47 +156,37 @@ python -m airecon
 
 # 📋 Useful Commands
 
-## Check Status
+Check Status
 
 ```bash
 python -m airecon status
 ```
 
----
-
-## Start AIRecon
+Start AIRecon
 
 ```bash
 python -m airecon
 ```
 
----
-
-## Show Help
+Show Help
 
 ```text
 /help
 ```
 
----
-
-## Clear Screen
-
-```text
-/clear
-```
-
----
-
-## Show Skills
+Show Skills
 
 ```text
 /skills
 ```
 
----
+Clear Screen
 
-## Exit
+```text
+/clear
+```
+
+Exit
 
 ```text
 /exit
@@ -214,169 +196,172 @@ python -m airecon
 
 # 🧪 Example Assessment Prompt
 
-```
+```text
 Target: https://portswigger.net/
 
 Tasks:
 
-1. Identify all open ports.
-
-2. Identify running services.
-
+1. Identify open ports.
+2. Detect running services.
 3. Detect technologies.
-
 4. Identify potential vulnerabilities.
-
-5. Identify matching CVEs.
-
-6. Display results only.
-
-7. Do not exploit vulnerabilities.
+5. Identify related CVEs.
+6. Display the assessment.
+7. Do not perform exploitation.
 ```
 
 ---
 
 # 📊 Workflow
 
-```
+```text
 Target
-
-↓
-
+   │
+   ▼
+Reconnaissance
+   │
+   ▼
 Nmap Scan
-
-↓
-
+   │
+   ▼
 Technology Detection
-
-↓
-
+   │
+   ▼
 HTTP Analysis
-
-↓
-
+   │
+   ▼
 Browser Automation
-
-↓
-
-AI Analysis
-
-↓
-
-CVE Mapping
-
-↓
-
-Security Report
+   │
+   ▼
+AI Analysis (Qwen3.5:9B)
+   │
+   ▼
+Security Assessment
 ```
 
 ---
 
 # 🎯 Tested Targets
 
-- PortSwigger
-- scanme.nmap.org
-- testaspnet.vulnweb.com
+The project was evaluated on publicly available practice targets:
+
+- https://portswigger.net
+- https://scanme.nmap.org
+- http://testaspnet.vulnweb.com
+
+Testing focused on:
+
+- Open Port Discovery
+- Service Detection
+- Technology Fingerprinting
+- Security Header Analysis
+- CVE Identification
+- Passive Vulnerability Assessment
 
 ---
 
-# 📈 Sample Output
+# 📈 Sample Results
 
-The tool identifies:
+AIRecon successfully identified:
 
 - Open Ports
-- Services
-- Technologies
+- Running Services
+- Web Technologies
 - Security Headers
-- CVEs
+- Potential Vulnerabilities
+- CVEs (when applicable)
 - Risk Level
 - Security Posture
-- Potential Vulnerabilities
 
 ---
 
 # 📸 Screenshots
 
-Add screenshots:
+Add your screenshots in the `screenshots/` folder.
 
-```
+```text
 screenshots/
-
-├── airecon-home.png
-
-├── colab-gpu.png
-
-├── cloudflare.png
-
 ├── status.png
-
+├── colab.png
+├── tunnel.png
 ├── portswigger.png
-
 └── vulnweb.png
+```
+
+Example:
+
+```markdown
+![AIRecon Status](screenshots/status.png)
+
+![Google Colab](screenshots/colab.png)
+
+![PortSwigger Assessment](screenshots/portswigger.png)
 ```
 
 ---
 
 # 🚀 Future Improvements
 
-- Gemini API Support
-- OpenAI API Support
-- Multi-LLM Support
-- Better CVE Ranking
-- Automatic PDF Reports
-- RAG Integration
-- Agent Memory Improvements
+- Gemini API integration
+- Multi-model support
+- Improved CVE ranking
+- PDF report generation
+- RAG integration
+- Enhanced agent memory
 
 ---
 
-# 🙋 Frequently Asked Questions
+# 📚 What I Learned
+
+Through this project I gained hands-on experience with:
+
+- Google Colab GPU deployment
+- Ollama configuration
+- Cloudflare Tunnel setup
+- Remote LLM inference
+- AI-assisted penetration testing
+- Docker sandbox execution
+- Passive reconnaissance
+- CVE mapping
+- Security reporting
+
+---
+
+# 🙋 FAQ
 
 ### Why Google Colab?
 
-To use a free Tesla T4 GPU for running Ollama.
+To run the Qwen3.5:9B model on a free Tesla T4 GPU because my local machine does not have sufficient GPU resources.
 
 ### Why Cloudflare Tunnel?
 
-To securely connect the Ollama server running in Colab with AIRecon on Kali Linux.
+To securely expose the Ollama server running inside Google Colab to AIRecon on Kali Linux.
 
 ### Why Ollama?
 
-To run open-source LLMs locally/remotely without relying on paid cloud APIs.
+To host and serve open-source LLMs without relying on proprietary cloud-hosted inference.
 
 ### Why AIRecon?
 
-To automate reconnaissance and organize security findings using AI.
-
----
-
-# 📚 Project Learnings
-
-- Google Colab GPU integration
-- Ollama deployment
-- Cloudflare Tunnel setup
-- Remote AI inference
-- AI-assisted penetration testing
-- Passive reconnaissance
-- CVE mapping
-- Docker sandbox usage
+To automate reconnaissance and assist with security assessments using AI.
 
 ---
 
 # 🤝 Credits
 
-This repository is based on the open-source AIRecon project.
+This repository is based on the open-source **AIRecon** project.
 
 My contributions include:
 
-- Google Colab integration
-- Ollama remote deployment
-- Cloudflare Tunnel configuration
-- AIRecon setup on Kali Linux
-- Testing and benchmarking
-- Documentation and workflow improvements
+- Integrating Google Colab with AIRecon
+- Configuring remote Ollama inference
+- Setting up Cloudflare Tunnel
+- Testing reconnaissance workflows
+- Benchmarking AIRecon
+- Creating project documentation
 
 ---
 
 # 📄 License
 
-This repository follows the original AIRecon project license.
+This repository follows the original AIRecon project license (MIT).
